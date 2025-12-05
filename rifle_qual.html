@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>US Army Rifle Qualification (Prototype)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0;
+      padding: 10px;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin: 5px 0 10px;
+      text-align: center;
+    }
+
+    #gameContainer {
+      width: 100%;
+      max-width: 500px;
+      border: 2px solid #555;
+      border-radius: 6px;
+      padding: 10px;
+      box-sizing: border-box;
+      background: #222;
+    }
+
+    #controlPanel {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 5px;
+      margin-bottom: 10px;
+      font-size: 0.9rem;
+    }
+
+    #controlPanel button {
+      flex: 1 1 48%;
+      padding: 8px;
+      background: #2e7d32;
+      border: none;
+      color: #fff;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+
+    #controlPanel button:disabled {
+      background: #555;
+      cursor: default;
+    }
+
+    #infoPanel {
+      margin-top: 5px;
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
+
+    #range {
+      position: relative;
+      width: 100%;
+      height: 260px;
+      background: linear-gradient(#444 0%, #3c3c3c 40%, #1b5e20 41%, #1b5e20 100%);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+
+    .distanceLine {
+      position: absolute;
+      left: 0;
+      right: 0;
+      border-top: 1px dashed rgba(255,255,255,0.15);
+      font-size: 0.7rem;
+      color: rgba(255,255,255,0.7);
+      padding-left: 4px;
+    }
+
+    .target {
+      position: absolute;
+      width: 10px;   /* quarter of previous 40x80 */
+      height: 20px;
+      background: #1b3011;
+      border-radius: 8px 8px 3px 3px;
+      cursor: pointer;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      box-shadow: 0 0 4px rgba(0,0,0,0.8);
+      overflow: visible;
+      touch-action: manipulation;
+    }
+
+    /* To use your real silhouette, replace background with:
+       background: url("target.png") no-repeat center/contain;
+       and tweak width/height as needed.
+    */
+
+    .target span {
+      margin-top: -16px;
+      font-size: 0.65rem;
+      color: #ddd;
+      background: rgba(0,0,0,0.6);
+      padding: 0 3px;
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+
+    /* Touch feedback animations */
+    @keyframes hitPulse {
+      0%   { transform: scale(1);   box-shadow: 0 0 6px rgba(255,255,255,0.8); }
+      100% { transform: scale(0.9); box-shadow: 0 0 2px rgba(0,0,0,0.6); }
+    }
+
+    @keyframes missPulse {
+      0%   { transform: scale(1);   box-shadow: 0 0 8px rgba(244,67,54,0.9); }
+      100% { transform: scale(0.9); box-shadow: 0 0 2px rgba(0,0,0,0.6); }
+    }
+
+    .target.hit {
+      animation: hitPulse 0.12s ease-out;
+    }
+
+    .target.miss {
+      animation: missPulse 0.12s ease-out;
+    }
+
+    #statusBar {
+      margin-top: 8px;
+      font-size: 0.85rem;
+      min-height: 1.2em;
+    }
+
+    #statusBar strong {
+      color: #ffeb3b;
+    }
+  </style>
+</head>
+<body>
+  <h1>US Army Rifle Qualification (Prototype)</h1>
+  <div id="gameContainer">
+    <div id="controlPanel">
+      <button id="startBtn">Start Qualification</button>
+      <button id="stanceBtn">Change Stance</button>
+    </div>
+
+    <div id="infoPanel">
+      <div>Iteration: <span id="iterationDisplay">0 / 4</span></div>
+      <div>Shot: <span id="shotDisplay">0 / 40</span></div>
+      <div>Hits: <span id="hitsDisplay">0</span> | Misses: <span id="missesDisplay">0</span></div>
+      <div>Your stance: <span id="stanceDisplay">Standing (Unsupported)</span></div>
+      <div>Required stance: <span id="requiredStanceDisplay">Standing (Unsupported)</span></div>
+    </div>
+
+    <div id="range"></div>
+
+    <div id="statusBar"></div>
+  </div>
+
+  <script>
+    // ----- CONFIG -----
+    const DISTANCES = [50, 100, 150, 200, 250, 300];
+
+    // 50 m is closest (bottom), 300 m farthest (top)
+    const distanceToYPercent = {
+      50: 5,
+      100: 20,
+      150: 35,
+      200: 50,
+      250: 65,
+      300: 80
+    };
+
+    const STANCES = [
+      { name: "Standing (Unsupported)", limit: 1 },
+      { name: "Prone Unsupported",     limit: 9 },
+      { name: "Prone Supported",       limit: 10 },
+      { name: "Kneeling Supported",    limit: 10 },
+      { name: "Standing Supported",    limit: 10 }
+    ];
+
+    const TOTAL_ITERATIONS = 4;
+    const TOTAL_SHOTS = 40;
+
+    // Stance schedule per shot (1..40)
+    const stanceSchedule = [];
+    STANCES.forEach((stance, idx) => {
+      for (let i = 0; i < stance.limit; i++) stanceSchedule.push(idx);
+    });
+
+    // Firing table: sequence of events
+    // type 'batch': show all distances simultaneously
+    // type 'delay': pause with optional cue
+    const firingEvents = [
+      // Iteration 1
+      { type: 'batch', iteration: 1, duration: 3,  distances: [50],             lanes: ['left'], cue: 'Switch position after this shot.' },
+      { type: 'batch', iteration: 1, duration: 5,  distances: [150] },
+      { type: 'batch', iteration: 1, duration: 5,  distances: [200] },
+      { type: 'batch', iteration: 1, duration: 13, distances: [100,150,200] },
+      { type: 'batch', iteration: 1, duration: 19, distances: [100,150,200,250] },
+      { type: 'delay', iteration: 1, duration: 5,  cue: 'Switch position now.' },
+
+      // Iteration 2
+      { type: 'batch', iteration: 2, duration: 6,  distances: [300] },
+      { type: 'batch', iteration: 2, duration: 8,  distances: [150,300] },
+      { type: 'batch', iteration: 2, duration: 8,  distances: [200,300] },
+      { type: 'batch', iteration: 2, duration: 8,  distances: [250,300] },
+      { type: 'batch', iteration: 2, duration: 17, distances: [150,250,300] },
+      { type: 'delay', iteration: 2, duration: 8,  cue: 'Switch position now.' },
+
+      // Iteration 3
+      { type: 'batch', iteration: 3, duration: 14, distances: [50,200,250], lanes: ['right', null, null] },
+      { type: 'batch', iteration: 3, duration: 8,  distances: [50,200],     lanes: ['left',  null] },
+      { type: 'batch', iteration: 3, duration: 8,  distances: [150,250] },
+      { type: 'batch', iteration: 3, duration: 14, distances: [100,200,250] },
+      { type: 'delay', iteration: 3, duration: 5,  cue: 'Switch position now.' },
+
+      // Iteration 4
+      { type: 'batch', iteration: 4, duration: 6,  distances: [50,100],      lanes: ['left',  null] },
+      { type: 'batch', iteration: 4, duration: 6,  distances: [100,150] },
+      { type: 'batch', iteration: 4, duration: 11, distances: [50,100,150],  lanes: ['right', null, null] },
+      { type: 'batch', iteration: 4, duration: 11, distances: [50,100,150],  lanes: ['left',  null, null] }
+    ];
+
+    // ----- STATE -----
+    let isRunning = false;
+    let currentIteration = 0;
+    let shotCounter = 0;       // 0..40
+    let hits = 0;
+    let misses = 0;
+
+    let currentEventIndex = 0;
+    let activeTargets = [];
+    let eventTimer = null;
+
+    let stanceIndex = 0;       // player's current stance
+
+    // ----- DOM -----
+    const rangeEl = document.getElementById("range");
+    const startBtn = document.getElementById("startBtn");
+    const stanceBtn = document.getElementById("stanceBtn");
+    const iterationDisplay = document.getElementById("iterationDisplay");
+    const shotDisplay = document.getElementById("shotDisplay");
+    const hitsDisplay = document.getElementById("hitsDisplay");
+    const missesDisplay = document.getElementById("missesDisplay");
+    const stanceDisplay = document.getElementById("stanceDisplay");
+    const requiredStanceDisplay = document.getElementById("requiredStanceDisplay");
+    const statusBar = document.getElementById("statusBar");
+
+    // ----- INIT RANGE -----
+    function initRange() {
+      rangeEl.innerHTML = "";
+      DISTANCES.forEach(d => {
+        const line = document.createElement("div");
+        line.className = "distanceLine";
+        line.style.bottom = distanceToYPercent[d] + "%";
+        line.textContent = d + " m";
+        rangeEl.appendChild(line);
+      });
+    }
+
+    // ----- UI UPDATE -----
+    function updateUI() {
+      iterationDisplay.textContent = currentIteration + " / " + TOTAL_ITERATIONS;
+      shotDisplay.textContent = shotCounter + " / " + TOTAL_SHOTS;
+      hitsDisplay.textContent = hits;
+      missesDisplay.textContent = misses;
+      stanceDisplay.textContent = STANCES[stanceIndex].name;
+
+      const nextRequiredIndex = stanceSchedule[Math.min(shotCounter, stanceSchedule.length - 1)];
+      requiredStanceDisplay.textContent = STANCES[nextRequiredIndex].name;
+    }
+
+    // ----- GAME FLOW -----
+    function resetGame() {
+      isRunning = false;
+      currentIteration = 0;
+      shotCounter = 0;
+      hits = 0;
+      misses = 0;
+      currentEventIndex = 0;
+      activeTargets.forEach(t => {
+        if (rangeEl.contains(t.el)) rangeEl.removeChild(t.el);
+      });
+      activeTargets = [];
+      clearTimeout(eventTimer);
+      eventTimer = null;
+      stanceIndex = 0;
+      statusBar.textContent = "Press Start Qualification to begin.";
+      updateUI();
+    }
+
+    function startGame() {
+      resetGame();
+      isRunning = true;
+      startBtn.disabled = true;
+      statusBar.textContent = "Qualification started. Watch for targets!";
+      runNextEvent();
+    }
+
+    function runNextEvent() {
+      if (!isRunning) return;
+
+      // If all events consumed or all shots fired, end game
+      if (currentEventIndex >= firingEvents.length || shotCounter >= TOTAL_SHOTS) {
+        endGame();
+        return;
+      }
+
+      const evt = firingEvents[currentEventIndex++];
+
+      if (evt.type === 'delay') {
+        currentIteration = evt.iteration;
+        updateUI();
+        statusBar.textContent = (evt.cue || "Delay") + ` (${evt.duration}s)`;
+        eventTimer = setTimeout(() => {
+          runNextEvent();
+        }, evt.duration * 1000);
+      } else if (evt.type === 'batch') {
+        currentIteration = evt.iteration;
+        updateUI();
+        statusBar.textContent = `Iteration ${evt.iteration}: targets up for ${evt.duration} sec.`;
+        spawnBatchForEvent(evt);
+      }
+    }
+
+    function spawnBatchForEvent(evt) {
+      // Clear any leftover targets as misses (shouldn't normally happen)
+      activeTargets.forEach(t => {
+        if (rangeEl.contains(t.el)) {
+          rangeEl.removeChild(t.el);
+          misses++;
+        }
+      });
+      activeTargets = [];
+      updateUI();
+
+      // Determine required stance for this batch (all shots share it, given table)
+      const firstShotIndex = shotCounter + 1;
+      const requiredStanceIndex = stanceSchedule[firstShotIndex - 1];
+      requiredStanceDisplay.textContent = STANCES[requiredStanceIndex].name;
+
+      evt.distances.forEach((distance, idx) => {
+        if (shotCounter >= TOTAL_SHOTS) return;
+
+        const el = document.createElement("div");
+        el.className = "target";
+
+        const y = distanceToYPercent[distance] || 10;
+        el.style.bottom = y + "%";
+
+        // Lane: fixed left/right, no random offset within lane.
+        let lane = null;
+        if (evt.lanes && evt.lanes[idx]) {
+          lane = evt.lanes[idx];
+        } else {
+          lane = Math.random() < 0.5 ? "left" : "right";
+        }
+
+        if (lane === "left") {
+          el.style.left = "20%";
+        } else {
+          el.style.right = "20%";
+        }
+
+        const label = document.createElement("span");
+        label.textContent = distance + "m";
+        el.appendChild(label);
+
+        shotCounter++;
+        const shotIndex = shotCounter;
+
+        const targetObj = { el, distance, lane, shotIndex };
+        el.addEventListener("click", () => handleTargetClick(targetObj));
+
+        rangeEl.appendChild(el);
+        activeTargets.push(targetObj);
+      });
+
+      updateUI();
+
+      // Schedule end of exposure
+      eventTimer = setTimeout(() => {
+        // Targets still up at end of exposure count as misses
+        activeTargets.forEach(t => {
+          if (rangeEl.contains(t.el)) {
+            rangeEl.removeChild(t.el);
+            misses++;
+          }
+        });
+        activeTargets = [];
+        updateUI();
+        runNextEvent();
+      }, evt.duration * 1000);
+    }
+
+    function handleTargetClick(targetObj) {
+      if (!isRunning) return;
+      const el = targetObj.el;
+      if (!rangeEl.contains(el)) return;
+
+      const shotIndex = targetObj.shotIndex;
+      const requiredStanceIdx = stanceSchedule[shotIndex - 1];
+      const correctStance = (stanceIndex === requiredStanceIdx);
+
+      // Touch feedback: vibration
+      if (navigator.vibrate) {
+        navigator.vibrate(correctStance ? 40 : 80);
+      }
+
+      if (correctStance) {
+        hits++;
+        el.classList.add("hit");
+        statusBar.textContent = `Hit (${STANCES[stanceIndex].name})`;
+      } else {
+        misses++;
+        el.classList.add("miss");
+        statusBar.textContent =
+          `Wrong stance! Required: ${STANCES[requiredStanceIdx].name}.`;
+      }
+
+      // Remove after short flash
+      setTimeout(() => {
+        if (rangeEl.contains(el)) rangeEl.removeChild(el);
+      }, 120);
+
+      activeTargets = activeTargets.filter(t => t !== targetObj);
+      updateUI();
+    }
+
+    function endGame() {
+      isRunning = false;
+      clearTimeout(eventTimer);
+      eventTimer = null;
+      startBtn.disabled = false;
+
+      const scorePct = Math.round((hits / TOTAL_SHOTS) * 100);
+      statusBar.innerHTML =
+        `Qualification complete: <strong>${hits}</strong> hits / ${TOTAL_SHOTS} shots (${scorePct}%).`;
+    }
+
+    // ----- CONTROLS -----
+    startBtn.addEventListener("click", startGame);
+
+    stanceBtn.addEventListener("click", () => {
+      stanceIndex = (stanceIndex + 1) % STANCES.length;
+      updateUI();
+      statusBar.textContent = `Switched stance to ${STANCES[stanceIndex].name}.`;
+    });
+
+    // ----- INITIALIZE -----
+    initRange();
+    resetGame();
+  </script>
+</body>
+</html>
